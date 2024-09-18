@@ -1,47 +1,9 @@
-use scraper::{Html, Selector};
-use serde_json::json;
+use scraper::{ElementRef, Html, Selector};
+use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::process;
-
-fn parse(html: &str) -> Vec<serde_json::Value> {
-    let document = Html::parse_document(html);
-
-    let mut json_res = vec![];
-
-    // selectors
-
-    let main_selector = Selector::parse("div.main > *").unwrap();
-
-    // to-do
-    // make it so under "p" it gets each span.verse, then all the text contents after that tag, but before the next tag, so inbetween, then map each verse under "contents"
-    for elements in document.select(&main_selector) {
-        if elements.attr("class").unwrap_or_default() == "s" {
-            json_res.push(json!({
-                "type": "header",
-                "contents": elements.inner_html()
-            }));
-        } else if elements.attr("class").unwrap_or_default() == "d" {
-            json_res.push(json!({
-                "type": "subheader",
-                "contents": elements.inner_html()
-            }));
-        } else if elements.attr("class").unwrap_or_default() == "p" {
-            json_res.push(json!({
-                "type": "paragraph",
-                "contents": [elements.inner_html()]
-            }));
-        } else if elements.attr("class").unwrap_or_default() == "q" {
-            json_res.push(json!({
-                "type": "quote",
-                "contents": [elements.inner_html()]
-            }));
-        }
-    }
-
-    json_res
-}
 
 fn main() {
     let input_arg = env::args().nth(1).expect("no path given");
@@ -54,11 +16,184 @@ fn main() {
         }
     };
 
-    let verses = parse(&input_contents);
+    let parsed_json = parse(&input_contents);
 
     let file = File::create("OUTPUT.json").expect("Failed to create file");
     let mut writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(&mut writer, &verses).expect("Failed to write to file");
+    serde_json::to_writer_pretty(&mut writer, &parsed_json).expect("Failed to write to file");
     writer.flush().expect("Failed to flush writer");
-    println!("Written output to OUTPUT.json");
+    println!("Wrote output to OUTPUT.json");
+}
+
+fn parse(html: &str) -> Value {
+    let document = Html::parse_document(html);
+    let mut content_sections: Vec<Value> = Vec::new();
+
+    let mut current_verse_content = String::new();
+    let mut current_verse_number: Option<i32> = None;
+    let mut verse_parts: Vec<Value> = Vec::new();
+    let mut verse_type = "verse";
+
+    // Selectors
+    let div_selector = Selector::parse("div").unwrap();
+
+    // Helper function to finalize the current verse
+    fn finalize_current_verse(
+        current_verse_content: &mut String,
+        current_verse_number: &Option<i32>,
+        verse_parts: &mut Vec<Value>,
+        content_sections: &mut Vec<Value>,
+        verse_type: &str,
+    ) {
+        if let Some(verse_number) = current_verse_number {
+            if !verse_parts.is_empty() {
+                content_sections.push(json!({
+                    "type": verse_type,
+                    "verse": verse_number,
+                    "text": serde_json::to_value(verse_parts.clone()).unwrap()
+                }));
+            } else {
+                content_sections.push(json!({
+                    "type": verse_type,
+                    "verse": verse_number,
+                    "text": { "1": current_verse_content }
+                }));
+            }
+            verse_parts.clear();
+        }
+        *current_verse_content = String::new();
+    }
+
+    // Main loop to process HTML content
+    for div in document.select(&div_selector) {
+        let class_name = div.value().attr("class").unwrap_or("");
+
+        // Handle headers, subheaders, whitespace
+        match class_name {
+            "s" => {
+                finalize_current_verse(
+                    &mut current_verse_content,
+                    &current_verse_number,
+                    &mut verse_parts,
+                    &mut content_sections,
+                    verse_type,
+                );
+                content_sections.push(json!({
+                    "type": "header",
+                    "text": div.text().collect::<Vec<_>>().concat()
+                }));
+                current_verse_number = None;
+            }
+            "d" => {
+                finalize_current_verse(
+                    &mut current_verse_content,
+                    &current_verse_number,
+                    &mut verse_parts,
+                    &mut content_sections,
+                    verse_type,
+                );
+                content_sections.push(json!({
+                    "type": "subheader",
+                    "text": div.text().collect::<Vec<_>>().concat()
+                }));
+                current_verse_number = None;
+            }
+            "b" => {
+                finalize_current_verse(
+                    &mut current_verse_content,
+                    &current_verse_number,
+                    &mut verse_parts,
+                    &mut content_sections,
+                    verse_type,
+                );
+                content_sections.push(json!({
+                    "type": "whitespace",
+                }));
+                current_verse_number = None;
+            }
+            "p" | "q" => {
+                if class_name == "q" {
+                    verse_type = "verseQuote";
+                } else {
+                    verse_type = "verse";
+                }
+
+                for child in div.children() {
+                    if let Some(span) = ElementRef::wrap(child) {
+                        let span_class = span.value().attr("class").unwrap_or("");
+
+                        if span_class == "verse" {
+                            finalize_current_verse(
+                                &mut current_verse_content,
+                                &current_verse_number,
+                                &mut verse_parts,
+                                &mut content_sections,
+                                verse_type,
+                            );
+                            current_verse_number =
+                                span.value().attr("id").unwrap_or("0")[1..].parse().ok();
+                        }
+                        // Handle formatted spans (e.g., add, wj, etc.)
+                        else if span_class == "add" {
+                            if !current_verse_content.is_empty() {
+                                verse_parts.push(json!(current_verse_content));
+                                current_verse_content.clear();
+                            }
+                            // Push formatted content, but don't clear current_verse_content after
+                            verse_parts.push(json!({ "italic": true, "content": span.text().collect::<Vec<_>>().concat() }));
+                        } else if span_class == "wj" {
+                            if !current_verse_content.is_empty() {
+                                verse_parts.push(json!(current_verse_content));
+                                current_verse_content.clear();
+                            }
+                            verse_parts.push(json!({ "red": true, "content": span.text().collect::<Vec<_>>().concat() }));
+                        } else if span_class == "nd" {
+                            if !current_verse_content.is_empty() {
+                                verse_parts.push(json!(current_verse_content));
+                                current_verse_content.clear();
+                            }
+                            verse_parts.push(json!({ "smallCapsBold": true, "content": span.text().collect::<Vec<_>>().concat() }));
+                        }
+                    } else if child.value().is_text() {
+                        // Append normal text after formatted spans
+                        current_verse_content.push_str(&child.value().as_text().unwrap());
+                    }
+                }
+
+                // If there's remaining text in current_verse_content, push it to verse_parts
+                if !current_verse_content.is_empty() {
+                    verse_parts.push(json!(current_verse_content));
+                    current_verse_content.clear();
+                }
+
+                finalize_current_verse(
+                    &mut current_verse_content,
+                    &current_verse_number,
+                    &mut verse_parts,
+                    &mut content_sections,
+                    verse_type,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    finalize_current_verse(
+        &mut current_verse_content,
+        &current_verse_number,
+        &mut verse_parts,
+        &mut content_sections,
+        verse_type,
+    );
+
+    json!({
+        "details": {
+            "bibleName": "Text-Critical English New Testament",
+            "bibleAbbrev": "TCENT",
+            "bookName": "John",
+            "bookAbbrev": "JHN",
+            "chapter": 3,
+        },
+        "content": content_sections
+    })
 }
