@@ -122,57 +122,56 @@ fn parse(html: &str) -> Value {
                     if let Some(span) = ElementRef::wrap(child) {
                         let span_class = span.value().attr("class").unwrap_or("");
 
+                        // Detect the start of a new verse
                         if span_class == "verse" {
-                            finalize_current_verse(
-                                &mut current_verse_content,
-                                &current_verse_number,
-                                &mut verse_parts,
-                                &mut content_sections,
-                                verse_type,
-                            );
+                            if current_verse_number.is_some() {
+                                finalize_current_verse(
+                                    &mut current_verse_content,
+                                    &current_verse_number,
+                                    &mut verse_parts,
+                                    &mut content_sections,
+                                    verse_type,
+                                );
+                            }
                             current_verse_number =
                                 span.value().attr("id").unwrap_or("0")[1..].parse().ok();
-                        }
-                        // Handle formatted spans (e.g., add, wj, etc.)
-                        else if span_class == "add" {
+                        } else if span_class == "add" {
                             if !current_verse_content.is_empty() {
-                                verse_parts.push(json!(current_verse_content));
+                                verse_parts
+                                    .push(json!(current_verse_content.trim_end().to_string()));
                                 current_verse_content.clear();
                             }
-                            // Push formatted content, but don't clear current_verse_content after
-                            verse_parts.push(json!({ "italic": true, "content": span.text().collect::<Vec<_>>().concat() }));
+                            verse_parts.push(json!({
+                                "italic": true,
+                                "content": span.text().collect::<Vec<_>>().concat()
+                            }));
                         } else if span_class == "wj" {
                             if !current_verse_content.is_empty() {
-                                verse_parts.push(json!(current_verse_content));
+                                verse_parts
+                                    .push(json!(current_verse_content.trim_end().to_string()));
                                 current_verse_content.clear();
                             }
-                            verse_parts.push(json!({ "red": true, "content": span.text().collect::<Vec<_>>().concat() }));
-                        } else if span_class == "nd" {
-                            if !current_verse_content.is_empty() {
-                                verse_parts.push(json!(current_verse_content));
-                                current_verse_content.clear();
-                            }
-                            verse_parts.push(json!({ "smallCapsBold": true, "content": span.text().collect::<Vec<_>>().concat() }));
+                            verse_parts.push(json!({
+                                "red": true,
+                                "content": span.text().collect::<Vec<_>>().concat()
+                            }));
                         }
                     } else if child.value().is_text() {
-                        // Append normal text after formatted spans
                         current_verse_content.push_str(&child.value().as_text().unwrap());
+                    }
+
+                    // Handle remaining text between spans before encountering a new verse
+                    if current_verse_number.is_some() && !current_verse_content.is_empty() {
+                        verse_parts.push(json!(current_verse_content));
+                        current_verse_content.clear();
                     }
                 }
 
-                // If there's remaining text in current_verse_content, push it to verse_parts
+                // Finalize any remaining text at the end
                 if !current_verse_content.is_empty() {
                     verse_parts.push(json!(current_verse_content));
                     current_verse_content.clear();
                 }
-
-                finalize_current_verse(
-                    &mut current_verse_content,
-                    &current_verse_number,
-                    &mut verse_parts,
-                    &mut content_sections,
-                    verse_type,
-                );
             }
             _ => {}
         }
